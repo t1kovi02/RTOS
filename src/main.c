@@ -1,3 +1,6 @@
+//Tavoitteena päästä kurssi läpi eli 1-2
+
+
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/device.h>
