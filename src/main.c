@@ -6,10 +6,17 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/uart.h>
 #include <string.h>
+#include <stdlib.h>
+#include <ctype.h>
 #include <zephyr/timing/timing.h>
 
 //Debug
 #define DEBUG 1
+
+// error codes
+#define TIME_LEN_ERROR      -1
+#define TIME_ARRAY_ERROR    -2
+#define TIME_VALUE_ERROR    -3
 
 // Led pin configurations
 static const struct gpio_dt_spec red = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
@@ -40,6 +47,10 @@ K_SEM_DEFINE(complete, 0, 1);
 static uint64_t last_task_us = 0;
 static uint64_t total_sequence_us = 0;
 
+// k_timer
+static struct k_timer traffic_timer;
+static char pending_sequence[20];
+
 // FIFO data type
 struct data_t {
 	void *fifo_reserved;
@@ -60,6 +71,43 @@ K_THREAD_DEFINE(dis_thread, STACKSIZE, dispatcher_task, NULL, NULL, NULL, PRIORI
 K_THREAD_DEFINE(red_thread, STACKSIZE, red_task, NULL, NULL, NULL, PRIORITY, 0, 0);
 K_THREAD_DEFINE(yellow_thread, STACKSIZE, yellow_task, NULL, NULL, NULL, PRIORITY, 0, 0);
 K_THREAD_DEFINE(green_thread, STACKSIZE, green_task, NULL, NULL, NULL, PRIORITY, 0, 0);
+
+// Time parser
+int time_parse(char *time) {
+    if (time == NULL || strlen(time) != 6) {
+        return TIME_LEN_ERROR;
+    }
+
+    for (int i = 0; i < 6; i++) {
+        if (!isdigit((unsigned char)time[i])) {
+            return TIME_LEN_ERROR;
+        }
+    }
+
+    int values[3];
+    values[2] = atoi(time + 4); // seconds
+    time[4] = 0;
+    values[1] = atoi(time + 2); // minutes
+    time[2] = 0;
+    values[0] = atoi(time);     // hours
+
+    if (values[0] < 0 || values[0] > 23 || 
+        values[1] < 0 || values[1] > 59 || 
+        values[2] < 0 || values[2] > 59) {
+        return TIME_VALUE_ERROR;
+    }
+
+    return (values[1] * 60) + values[2];
+}
+
+void traffic_timer_expiry(struct k_timer *timer_id) {
+    
+    struct data_t *buf = k_malloc(sizeof(struct data_t));
+    if (buf != NULL) {
+        snprintf(buf->msg, sizeof(buf->msg), "%s", "RYG");
+        k_fifo_put(&dispatcher_fifo, buf);
+    }
+}
 
 int init_uart(void) {
 	if (!device_is_ready(uart_dev)) {
@@ -95,6 +143,10 @@ int main(void)
         printk("Initialization failed!\n");
         return -1;
     }
+
+    k_timer_init(&traffic_timer, traffic_timer_expiry, NULL);
+
+    printk("Traffict lights ready!\n");
 
     return 0;
 }
@@ -145,9 +197,16 @@ static void dispatcher_task(void *unused1, void *unused2, void *unused3)
 		memcpy(sequence, rec_item->msg, 20);
 		k_free(rec_item);
 
-		#if DEBUG
-        printk("Dispatcher processing: %s\n", sequence);
-        #endif
+        char time_buf[20];
+        strncpy(time_buf, sequence, sizeof(time_buf));
+
+        int parsed_seconds = time_parse(time_buf);
+
+        if (parsed_seconds >= 0) {
+            printk("Time recognised: %d seconds. Timer starts.\n", parsed_seconds);
+            k_timer_start(&traffic_timer, K_SECONDS(parsed_seconds), K_NO_WAIT);
+            continue;
+        }
 
         total_sequence_us = 0;
 
@@ -256,3 +315,58 @@ while (true) {
         k_sem_give(&complete);
 	}
 }
+
+
+/* #include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include "TimeParser.h"
+
+// time format: HHMMSS (6 characters)
+int time_parse(char *time) {
+
+	// how many seconds, default returns error
+	int seconds = TIME_LEN_ERROR;
+
+	// TODO: Check that string is not null
+
+	if (time == NULL || strlen(time) != 6) {
+        return TIME_LEN_ERROR;
+    }
+
+    for (int i = 0; i < 6; i++) {
+        if (!isdigit((unsigned char)time[i])) {
+            return TIME_LEN_ERROR;
+        }
+    }	
+
+	// Parse values from time string
+	// For example: 124033 -> 12hour 40min 33sec
+    int values[3];
+	values[2] = atoi(time+4); // seconds
+	time[4] = 0;
+	values[1] = atoi(time+2); // minutes
+	time[2] = 0;
+	values[0] = atoi(time); // hours
+	// Now you have:
+	// values[0] hour
+	// values[1] minute
+	// values[2] second
+
+	// TODO: Add boundary check time values: below zero or above limit not allowed
+	// limits are 59 for minutes, 23 for hours, etc
+
+	if (values[0] < 0 || values[0] > 23 || 
+        values[1] < 0 || values[1] > 59 || 
+        values[2] < 0 || values[2] > 59) 
+		{
+        return TIME_VALUE_ERROR; }
+	// TODO: Calculate return value from the parsed minutes and seconds
+	// Otherwise error will be returned!
+	// seconds = ...
+
+	seconds = (values[1] * 60) + values[2];
+
+	return seconds;
+}
+*/
