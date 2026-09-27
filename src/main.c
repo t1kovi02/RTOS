@@ -6,7 +6,10 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/uart.h>
 #include <string.h>
+#include <zephyr/timing/timing.h>
 
+//Debug
+#define DEBUG 1
 
 // Led pin configurations
 static const struct gpio_dt_spec red = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
@@ -32,6 +35,10 @@ K_CONDVAR_DEFINE(greencon);
 
 //Release signal
 K_SEM_DEFINE(complete, 0, 1);
+
+//timing variables
+static uint64_t last_task_us = 0;
+static uint64_t total_sequence_us = 0;
 
 // FIFO data type
 struct data_t {
@@ -81,12 +88,15 @@ int init_led(void) {
 
 int main(void)
 {
-	if (init_uart() != 0 || init_led() != 0) {
-		printk("Initialization failed!\n");
-		return -1;
-	}
+    timing_init();
+    timing_start();
 
-	return 0;
+   	 if (init_uart() != 0 || init_led() != 0) {
+        printk("Initialization failed!\n");
+        return -1;
+    }
+
+    return 0;
 }
 
 // Uart task
@@ -105,18 +115,20 @@ static void uart_task(void *unused1, void *unused2, void *unused3)
 				}
 				} else if (uart_msg_cnt > 0) {
 
-			printk("UART received: %s\n", uart_msg);
+					#if DEBUG
+                	printk("UART received: %s\n", uart_msg);
+                	#endif
 
-				struct data_t *buf = k_malloc(sizeof(struct data_t));
-				if (buf != NULL) {
-					snprintf(buf->msg, sizeof(buf->msg), "%s", uart_msg);
+                	struct data_t *buf = k_malloc(sizeof(struct data_t));
+               		 if (buf != NULL) {
+                    snprintf(buf->msg, sizeof(buf->msg), "%s", uart_msg);
 
-					k_fifo_put(&dispatcher_fifo, buf);
-				}
+                    k_fifo_put(&dispatcher_fifo, buf);
+                }
 
-			uart_msg_cnt = 0;
-			memset(uart_msg, 0, 20);
-			}
+                uart_msg_cnt = 0;
+                memset(uart_msg, 0, 20);
+            }
 		}
 		k_msleep(10);
 	}
@@ -133,31 +145,37 @@ static void dispatcher_task(void *unused1, void *unused2, void *unused3)
 		memcpy(sequence, rec_item->msg, 20);
 		k_free(rec_item);
 
-		printk("Dispatcher processing: %s\n", sequence);
+		#if DEBUG
+        printk("Dispatcher processing: %s\n", sequence);
+        #endif
 
+        total_sequence_us = 0;
 
-		for (int i = 0; i < strlen(sequence); i++) {
-			char color = sequence[i];
+        for (int i = 0; i < strlen(sequence); i++) {
+            char color = sequence[i];
 
-			k_mutex_lock(&mutexled, K_FOREVER);
+            k_mutex_lock(&mutexled, K_FOREVER);
 
+            if (color == 'R' || color == 'r') {
+                k_condvar_signal(&redcon);
+            } else if (color == 'Y' || color == 'y') {
+                k_condvar_signal(&yellowcon);
+            } else if (color == 'G' || color == 'g') {
+                k_condvar_signal(&greencon);
+            } else {
+                k_mutex_unlock(&mutexled);
+                continue; 
+            }
 
-			if (color == 'R' || color == 'r') {
-				k_condvar_signal(&redcon);
-			} else if (color == 'Y' || color == 'y') {
-				k_condvar_signal(&yellowcon);
-			} else if (color == 'G' || color == 'g') {
-				k_condvar_signal(&greencon);
-			} else {
-				k_mutex_unlock(&mutexled);
-				continue; 
-			}
+            k_mutex_unlock(&mutexled);
 
-			k_mutex_unlock(&mutexled);
+            k_sem_take(&complete, K_FOREVER);
+            
+            total_sequence_us += last_task_us;
+        }
 
-			k_sem_take(&complete, K_FOREVER);
-		}
-	}
+        printk("Sequence duration: %llu us\n", total_sequence_us);
+    }
 }
 
 
@@ -169,13 +187,21 @@ static void red_task(void *p1, void *p2, void *p3) {
 		k_condvar_wait(&redcon, &mutexled, K_FOREVER);
 		k_mutex_unlock(&mutexled);
 
-		gpio_pin_set_dt(&red, 1);
-		printk("[LED] Red ON\n");
-		k_sleep(K_SECONDS(1));
-		gpio_pin_set_dt(&red, 0);
+		timing_t start_time = timing_counter_get();
+        gpio_pin_set_dt(&red, 1);
+        #if DEBUG
+        printk("[LED] Red ON\n");
+        #endif
+        k_sleep(K_SECONDS(1));
+        gpio_pin_set_dt(&red, 0);
 
+        timing_t end_time = timing_counter_get();
+        uint64_t ns = timing_cycles_to_ns(timing_cycles_get(&start_time, &end_time));
+        last_task_us = ns / 1000;
 
-		k_sem_give(&complete);
+        printk("Red task duration: %llu us\n", last_task_us);
+
+        k_sem_give(&complete);
 	}
 }
 
@@ -186,15 +212,23 @@ static void yellow_task(void *p1, void *p2, void *p3) {
 		k_condvar_wait(&yellowcon, &mutexled, K_FOREVER);
 		k_mutex_unlock(&mutexled);
 
+		timing_t start_time = timing_counter_get();
+        gpio_pin_set_dt(&red, 1);
+        gpio_pin_set_dt(&green, 1);
+        #if DEBUG
+        printk("[LED] Yellow ON\n");
+        #endif
+        k_sleep(K_SECONDS(1));
+        gpio_pin_set_dt(&red, 0);
+        gpio_pin_set_dt(&green, 0);
 
-		gpio_pin_set_dt(&red, 1);
-		gpio_pin_set_dt(&green, 1);
-		printk("[LED] Yellow ON\n");
-		k_sleep(K_SECONDS(1));
-		gpio_pin_set_dt(&red, 0);
-		gpio_pin_set_dt(&green, 0);
+        timing_t end_time = timing_counter_get();
+        uint64_t ns = timing_cycles_to_ns(timing_cycles_get(&start_time, &end_time));
+        last_task_us = ns / 1000;
 
-		k_sem_give(&complete);
+        printk("Yellow task duration: %llu us\n", last_task_us);
+
+        k_sem_give(&complete);
 	}
 }
 
@@ -204,12 +238,21 @@ while (true) {
 		k_mutex_lock(&mutexled, K_FOREVER);
 		k_condvar_wait(&greencon, &mutexled, K_FOREVER);
 		k_mutex_unlock(&mutexled);
+		
+		timing_t start_time = timing_counter_get();
+        gpio_pin_set_dt(&green, 1);
+        #if DEBUG
+        printk("[LED] Green ON\n");
+        #endif
+        k_sleep(K_SECONDS(1));
+        gpio_pin_set_dt(&green, 0);
 
-		gpio_pin_set_dt(&green, 1);
-		printk("[LED] Green ON\n");
-		k_sleep(K_SECONDS(1));
-		gpio_pin_set_dt(&green, 0);
+        timing_t end_time = timing_counter_get();
+        uint64_t ns = timing_cycles_to_ns(timing_cycles_get(&start_time, &end_time));
+        last_task_us = ns / 1000;
 
-		k_sem_give(&complete);
+        printk("Green task duration: %llu us\n", last_task_us);
+
+        k_sem_give(&complete);
 	}
 }
